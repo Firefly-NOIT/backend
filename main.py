@@ -9,12 +9,17 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from ultralytics import YOLO
 import queue
 import zlib
+import time
 
 app = FastAPI()
 
 model = YOLO("model.pt")
 
 streams = {}
+
+last_spotted_fire = time.time()
+times_spotted_fire = 0
+fire_present = False
 
 def generate_raw_frames():
     cap = cv2.VideoCapture(0)
@@ -39,6 +44,10 @@ def get_stream_frames(stream_id):
     return frame
 
 def generate_prediction_frames(id: str):
+    global last_spotted_fire
+    global times_spotted_fire
+    global fire_present
+
     while True:
         if not id in streams:
             return b''
@@ -47,6 +56,24 @@ def generate_prediction_frames(id: str):
         # convert bytes to cv2 image
         frame = cv2.imdecode(np.frombuffer(frame_bytes, np.uint8), cv2.IMREAD_COLOR)
         results = model(source=frame)
+        names = []
+
+        for result in results:
+            names += [result.names[cls.item()] for cls in result.boxes.cls.int()]
+        if len(names) > 0 and last_spotted_fire < time.time():
+            last_spotted_fire = time.time() + 1.0
+            times_spotted_fire += 1
+            print(f"Spotted fire {times_spotted_fire} times")
+
+            if times_spotted_fire > 10:
+                fire_present = True
+                times_spotted_fire = 0
+                # debounce fire detection
+                last_spotted_fire = time.time() + 10.0
+        else:
+            if time.time() - last_spotted_fire > 1.0:
+                times_spotted_fire = 0
+
         annotated_frame = results[0].plot()
 
         ret, buffer = cv2.imencode('.jpg', annotated_frame)
@@ -85,3 +112,15 @@ async def stream(socket: WebSocket, id: str):
 
     except WebSocketDisconnect:
         del streams[id]
+
+# socket that mimics alert system
+@app.websocket("/alert")
+async def alert(socket: WebSocket):
+    await socket.accept()
+    global fire_present
+    while True:
+        await asyncio.sleep(1)
+        if fire_present:
+            fire_present = False
+            await socket.send_text("Fire detected!")
+            print("Fire detected!")
